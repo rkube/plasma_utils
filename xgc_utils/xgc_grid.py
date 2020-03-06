@@ -142,7 +142,100 @@ def get_node_connection(conns, nextnode, local_plane=True, pidx=0):
     return conn_dict
 
 
-# End of file grid.py
+
+def get_node_connections_3d(conns: np.ndarray, nextnode: np.ndarray, num_planes : int = 8) -> dict:
+    """For a given node, calculates the nodes it is directly connected to via triangles.
+    Output is a dictionary with the reference node as the key and a list of directly connected vertices as the value.
+
+    Input:
+    ======
+    conns: Array of vertices in a triangle. shape = (num_triangles, 3),
+    nextnode: Array that lists the vertex at the next plane.
+
+    Output:
+    =======
+    conn_dict: Dictionary. Key: vertex index. Value: List of vertex indices that a node connects to.
+
+    Here is some mockup-code that is automated by this routine.
+
+    # Total number of planes
+    n_pl = 4
+    # Vertices per plane
+    n_per_pl = 8
+
+    Create an array of vertices a reference vertex is connected to.
+    The last two refer to entries from nextnode.
+    i_0 = np.array([1, 2, 3, 2 + n_per_pl, 1 - n_per_pl])
+    # Plane 1
+    i_1 = np.array([1, 2, 3, 2 + n_per_pl, 1 - n_per_pl]) + 1 * n_per_pl
+    # Plane 2
+    i_2 = np.array([1, 2, 3, 2 + n_per_pl, 1 - n_per_pl]) + 2 * n_per_pl
+    # Plane 3
+    i_3 = np.array([1, 2, 3, 2 + n_per_pl, 1 - n_per_pl]) + 3 * n_per_pl
+
+    print(f"Plane 0: {i_0}")
+    print(f"Plane 1: {i_1}")
+    print(f"Plane 2: {i_2}")
+    print(f"Plane 3: {i_3}")
+
+    Plane 0: [ 1  2  3 10 -7]
+    Plane 1: [ 9 10 11 18  1]
+    Plane 2: [17 18 19 26  9]
+    Plane 3: [25 26 27 34 17]
+
+    We see that the array, describing connections in plane 0, refers to -7. A node
+    in plane 3 (due to periodicity). The array  translated into plane 3, refers to
+    node 34. We can map these indices onto the range of vertices, [0:31], by using mod:
+
+    print(f"Plane 0, with mod: {np.mod(i_0, n_per_pl * n_pl)}")
+    print(f"Plane 3, with mod: {np.mod(i_3, n_per_pl * n_pl)}")
+
+    Plane 0, with mod: [ 1  2  3 10 25]
+    Plane 3, with mod: [25 26 27  2 17]
+
+    """
+    
+    conn_dict = {}
+
+    # This + 1 is important!
+    vtx_per_plane = conns.max() + 1
+    assert(conns.min() == 0)
+
+    # Iterate over all vertices.
+    for vertex in range(conns.max()):
+        # 1) Find all triangles which include the current vertex
+        # Since each vertex occurs either 0 or 1 time in a triangle, each row 
+        # returned from np.argwhere is unique.
+        idx_tri = np.argwhere(conns == vertex)[:, 0]
+
+        # Now we have the triangles in which vertex occurs, identified as rows in conns.
+        # Get the unique vertices for these triangles
+        connected_vertices = np.unique(conns[idx_tri, :])
+
+        # Now we need to find the cross-plane connections. 
+        # Find the first cross-plane connection via a direct look-up from nextnode
+        connected_next_plane = nextnode[vertex] + vtx_per_plane
+        # Find the previous one via a inverse look-up
+        try:
+            connected_prev_plane = np.argwhere(nextnode == vertex).item() - vtx_per_plane
+        except:
+            # This may actually fail. In this case we just assume a self-connection
+            connected_prev_plane = vertex - vtx_per_plane
+
+        conn_vtx_list = np.concatenate((connected_vertices, np.array([connected_next_plane, connected_prev_plane])))
+
+        # Now we insert conn_vtx_list into conn_dict as the value for the current vertex.
+        # Do this for all planes and apply modulo for the first and last plane
+
+        for idx_pl in range(num_planes):
+            # We are inserting a vertex shifted to the plane at the current iteration
+            vtx_shift = vertex + idx_pl * vtx_per_plane
+            if((idx_pl == 0) or (idx_pl == num_planes - 1)):
+                conn_dict.update({vtx_shift: np.mod(conn_vtx_list + idx_pl * vtx_per_plane, num_planes * vtx_per_plane)})
+            else:
+                conn_dict.update({vtx_shift: conn_vtx_list + idx_pl * vtx_per_plane})
+
+    return conn_dict
 
 
 def cartesian_distance(nodeidx0, conns, coords, num_planes=8):
@@ -178,7 +271,7 @@ def cartesian_distance(nodeidx0, conns, coords, num_planes=8):
     return(dist)
 
 
-def normalized_cartesian_distance(nodeidx0, conns, coords, norm_par, norm_perp, num_planes=8):
+def normalized_cartesian_distance(nodeidx0: int, conns: list, coords: np.ndarray, norm_par: np.ndarray, norm_perp: np.ndarray, num_planes: int =8) -> np.ndarray:
     """Calculates the normalized cartesian distance from node nodeix0 to each item in conns. 
     The value to normalize is taken to be at the to-node. I.e. we assume that there is little variation
     in value we normalize to.
@@ -207,21 +300,16 @@ def normalized_cartesian_distance(nodeidx0, conns, coords, norm_par, norm_perp, 
     # Get perpendicular normalization
     # If we have passed a ndarray as the perpendicular normalization, we have to use only the
     # appropriate items.
-    if(isinstance(norm_perp, np.ndarray)):
-        norm_perp = norm_perp[conns_vec[:,0]]
-    #elif(isinstance(norm_perp), float):
-    #    norm_perp_vec = norm_perp * np.ones_like(R_vec)
+    norm_perp = norm_perp[conns_vec[:,0]]
     
     # Multiply S_vec elementwise by 0 if c[1] == 0, by 1 if abs(c[1]) == 1
     S_mask = np.abs(conns_vec[:, 1])
     # Calculate all S values. Use the R value of the to-nodes
     S_vec = 2. * np.pi * R_vec / num_planes / 4.
     # Get the parallel normalization
-    if(isinstance(norm_par, np.ndarray)):
-        norm_par = norm_par[conns_vec[:, 0]] 
+    norm_par = norm_par[conns_vec[:, 0]] 
 
     S_vec = S_vec * S_mask / norm_par
-    
     
     dist_R = (R_vec - R0) / norm_perp
     dist_Z = (Z_vec - Z0) / norm_perp
@@ -229,8 +317,8 @@ def normalized_cartesian_distance(nodeidx0, conns, coords, norm_par, norm_perp, 
 
     dist = np.stack((dist_R, dist_Z, dist_S), axis=1)
 
-
     return(dist)
+
 
 def shift_connections(from_node, conns, n_per_plane, to_plane, num_planes):
     """Translate a list of connections to another plane.

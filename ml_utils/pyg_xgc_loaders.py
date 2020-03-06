@@ -12,30 +12,139 @@ import torch
 from torch_geometric.data import InMemoryDataset, Data
 
 from sklearn import preprocessing
+from itertools import product
 
 sys.path.append("/home/rkube/software/adios2-release_25/lib64/python3.7/site-packages")
 import adios2
 from ..xgc_utils import xgc_grid, xgc_helpers
 
 
-def build_graph_list(data_x, data_y, edge_index_g, weights_g):
+def build_graph_weights(data_dir, weights_scaler, dt=1e-8, num_planes=8):
+    """Builds the edge_index and edge_weights structures for the XGC simulation in datadir
+    
+    Parameters:
+    -----------
+    datadir, string: Directory where the xgc.mesh and xgc.bfield files are.
+    weights_scaler, callable: Scaling function applied to weights.
+    num_planes, int: Number of poloidal planes
+    dt, float: Time step size
+    """
+    with np.load(join(data_dir, "xgc.mesh.npz")) as df:
+        coords = df["/coordinates/values"]
+        nextnode = df["nextnode"]
+        nc = df["/cell_set[0]/node_connect_list"]
+    
+    with np.load(join(data_dir, "xgc.bfield.npz")) as df:
+        Bvec = df["/node_data[0]/values"]
+               
+    # Calculate the total magnetic field
+    Btotal = np.sqrt(np.sum(Bvec**2.0, axis=1))  # Total magnetic field, in T
+    # Get background density and temperature. Hard-code those for test cases.
+    ne0 = 1e19 # Background electron density, in m^-3
+    ni0 = 1e19 # Background ion density, in m^-3
+    Te0 = 2e3 # Background electron temperaure, in eV
+    Ti0 = 2e3 # Background ion temperature, in eV
+
+    print(f"Using hard-coded value for ne0: {ne0}m^-3")
+    print(f"Using hard-coded value for ni0: {ni0}m^-3")
+    print(f"Using hard-coded value for Te0: {Te0}eV")
+    print(f"Using hard-coded value for Ti0: {Ti0}eV")
+
+    mu0 = 4. * np.pi * 1e-7 # Vacuum permeability, in H/m
+    eps0 = 8.854e-12 # Vacuum permittivity, in F/m
+    e = 1.602e-19 # Elementary charge, in C
+    me = 9.109e-31 # Electron mass, in kg
+    mi = 1.67e-27 # Proton mass, in kg
+    c0 = 3e8 # Speed of light in m/s
+
+    VA = Btotal / np.sqrt(mu0 * mi * ni0)
+    VS = np.sqrt(e * Te0 / me)
+    wpe = np.sqrt(ne0 * e * e / me / eps0)
+    de = c0 / wpe
+
+    print(f"mean(VA) = {VA.mean():4.2e}m/s")
+    print(f"VS = {VS:4.2e}m/s")
+    print(f"omega_pe = {wpe:4.2e}Hz")
+    print(f"Skin depth de = {de:f}m")
+
+    # Set parallel and perpendicular normalizations
+    norm_par = 0.5 * (VA + VS) * dt
+    norm_perp = de
+    rbf = lambda x: 1./np.sqrt(1. + x*x)
+    
+    # Create the mesh and get the node connections
+    mesh = xgc_grid.xgc_mesh(nc, coords)
+    conns = xgc_grid.get_node_connection(nc, nextnode, local_plane=False)
+    
+    nodes_per_plane = max(conns.keys()) + 1
+    num_vertices = nodes_per_plane * num_planes
+    print(f"Nodes per plane: {nodes_per_plane}, poloidal planes: {num_planes}")
+
+    # Calculate connection weights based on cartesian distance an RBFs
+    print(f"Calculating weights")
+    all_weights_3 = []
+    for from_node in conns.keys():
+        dist_normed = xgc_grid.normalized_cartesian_distance(from_node, conns[from_node], coords, norm_par, norm_perp)
+        all_weights_3.append(dist_normed)
+
+    all_weights_3 = np.vstack(all_weights_3)
+    all_weights_3 = weights_scaler(all_weights_3)
+
+    print(f"Scaling weights")
+    #scaler_r = preprocessing.MinMaxScaler()
+    #all_weights_3 = scaler_r.fit_transform(all_weights_3)
+
+    # Generate the weights tensor. Repeat the weights from the stencil of the first plane
+    weights = torch.tensor(all_weights_3)
+    weights = weights.repeat((num_planes, 1)).T
+    print(f"Weights repeated over {num_planes} shape = ", weights.shape)
+
+
+    print(f"Calculating connections in the mesh")
+    all_conns = []
+    for plane in range(num_planes):
+        for from_node in conns.keys():
+            rv = xgc_grid.shift_connections(from_node, conns[from_node], nodes_per_plane, plane, num_planes)
+            all_conns += rv
+
+    print(f"Calculating global edge index")
+    edge_index_all = torch.tensor(all_conns).contiguous().T
+    
+    return edge_index_all, weights, Btotal
+
+
+
+def build_graph_list(data_x, data_y, edge_index_g, weights_g, cuda=True):
     """Constructs the list of star-shaped sub-graphs
 
     Parameters:
     -----------
-    data_x, torch.tensor: vertex features. shape [nnodes, nfeatures]
-    data_y, torch.tensor: target features shape [nnodes, nfeatures]
+    data_x, torch.tensor: vertex features with shape [nnodes, nfeatures]
+    data_y, torch.tensor: target features with shape [nnodes, nfeatures]
     edge_index_g, torch.tensor: edge indices for the global graph. shape [2, num_edges]. max(edge_index_g) == nnodes -1
     weights_g, torch.tensor: connection weights of the global graph. shape [dim_weights, num_edges]
+    cuda, bool: If True, process everything on cuda (recommended). If not, use the cpu (not recommended).
 
     Returns:
     --------
     graph_list: List of star-shaped graphs.
 
     """
+    torch.set_default_dtype(torch.float64)
     
+    if cuda:
+        device = torch.device("cuda")       
+    else:
+        device = torch.device("cpu")
 
+    data_x.to(device)
+    data_y.to(device)
+    edge_index_g.to(device)
+    weights_g.to(device)
+
+    num_vertices = edge_index_g.max().item() + 1
     graph_list = []
+
     for vertex in range(num_vertices):
         # 1. Find all edges connecting to the current vertex. These will determine the current sub-graph
         # We extracting a star-shaped sub-graph with the current vertex in the center. That is, all connections
@@ -49,10 +158,13 @@ def build_graph_list(data_x, data_y, edge_index_g, weights_g):
         _, vertex_idx = edge_index_g[:, subgraph_edge_indices]
 
         # Test if there are zero-values in the graph. If there are, skip this one.
-        if (data_x[vertex_idx, :].abs() < 1e-16).sum() > 0:
+        # If we are working with residuals we should make sure that we don't discard
+        # a graph just because they are small. Here we have them in the last two indices,
+        # therefore use :-2 slicing in the second dimension.
+        if (((data_x[vertex_idx, :-2].abs() < 1e-16).sum() > 0) |
+            (torch.isnan(data_x[vertex_idx, :]).sum() > 0)):
             #print(f"Skipping graph with zero-values node features: vertex={vertex}")
             continue
-
 
         # Forthcoming, we assume that there are no duplicate connections.
         assert(torch.unique(vertex_idx).size()[0] == vertex_idx.size()[0])
@@ -61,7 +173,6 @@ def build_graph_list(data_x, data_y, edge_index_g, weights_g):
 
         # The number of nodes in the current subgraph is just the length
         nnodes = vertex_idx.shape[0]
-
 
         # Next: Swap the first item with the current vertex number in the subgraph
         if vertex_idx[0] != vertex:
@@ -77,6 +188,9 @@ def build_graph_list(data_x, data_y, edge_index_g, weights_g):
             vertex_idx[switch_idx] = vertex_idx[0]
             vertex_idx[0] = vertex
 
+        # Set weights for the self-loop to unity
+        weights_subgraph[:, 0] = torch.tensor([1.0, 1.0, 1.0])
+
         # Build a new edge_index, where the current vertex, indexed by zero, is connected
         # to all other vertices. This is a directed graph
 
@@ -85,14 +199,55 @@ def build_graph_list(data_x, data_y, edge_index_g, weights_g):
         edge_index_zero = torch.stack([torch.zeros(nnodes, dtype=torch.long), 
                                     torch.arange(nnodes, dtype=torch.long)])
 
-        graph_list.append(Data(x=data_x[vertex_idx, :].to(device=cuda), 
-                            y=data_y[vertex, :].to(device=cuda),
-                            edge_index=edge_index_zero.to(device=cuda), 
-                            edge_attr=weights_subgraph.T.to(device=cuda), 
-                            num_nodes=nnodes, 
-                            original_vertex=vertex))
+        graph_list.append(Data(x=data_x[vertex_idx, :], 
+                               y=data_y[vertex, :],
+                               edge_index=edge_index_zero, 
+                               edge_attr=weights_subgraph.T, 
+                               num_nodes=nnodes, 
+                               original_vertex=vertex))
 
     return graph_list
+
+
+def collate(data_list):
+    r"""Collates a python list of data objects to the internal storage
+    format of :class:`torch_geometric.data.InMemoryDataset`.
+
+    Code copied from torch_geometric.data.InMemoryDataset"""
+
+    keys = data_list[0].keys
+    data = data_list[0].__class__()
+
+    for key in keys:
+        data[key] = []
+    slices = {key: [0] for key in keys}
+
+    for item, key in product(data_list, keys):
+        data[key].append(item[key])
+        if torch.is_tensor(item[key]):
+            s = slices[key][-1] + item[key].size(
+                item.__cat_dim__(key, item[key]))
+        else:
+            s = slices[key][-1] + 1
+        slices[key].append(s)
+
+    if hasattr(data_list[0], '__num_nodes__'):
+        data.__num_nodes__ = []
+        for item in data_list:
+            data.__num_nodes__.append(item.num_nodes)
+
+    for key in keys:
+        item = data_list[0][key]
+        if torch.is_tensor(item):
+            data[key] = torch.cat(data[key],
+                                    dim=data.__cat_dim__(key, item))
+        elif isinstance(item, int) or isinstance(item, float):
+            data[key] = torch.tensor(data[key])
+
+        slices[key] = torch.tensor(slices[key], dtype=torch.long)
+
+    return data, slices
+
 
 
 class XGCGraphDataset(InMemoryDataset):
@@ -193,7 +348,6 @@ class XGCGraphDataset(InMemoryDataset):
 
         all_weights_3 = np.vstack(all_weights_3)
 
-
         print(f"Scaling weights")
         scaler_r = preprocessing.MinMaxScaler()
         all_weights_3 = scaler_r.fit_transform(all_weights_3)
@@ -212,7 +366,6 @@ class XGCGraphDataset(InMemoryDataset):
 
         print(f"Calculating global edge index")
         edge_index_all = torch.tensor(all_conns).contiguous().T
-
 
         # Compile feature vectors on all nodes
         print(f"Compiling node features")
@@ -379,16 +532,6 @@ class XGCGraphDataset_unnormalized(InMemoryDataset):
 
     def process(self):
         # Read data into huge `Data` list.
-        #data_list = [...]
-
-        # if self.pre_filter is not None:
-        #     data_list = [data for data in data_list if self.pre_filter(data)]
-
-        # if self.pre_transform is not None:
-        #     data_list = [self.pre_transform(data) for data in data_list]
-
-        # data, slices = self.collate(data_list)
-        # torch.save((data, slices), self.processed_paths[0])
 
         torch.set_default_dtype(torch.float64)
         cuda = torch.device('cuda')
@@ -519,171 +662,93 @@ class XGCGraphDataset_unnormalized(InMemoryDataset):
         print("processed_paths = ", self.processed_paths)
 
         return None
-    
 
 
-
-class XGCGraphDataset_ml2_it(InMemoryDataset):
-    r"""Loads the graph-lists of ml_data_case_2 using numpy files.
+class XGC_it_dataset(InMemoryDataset):
+    r"""Loads the graph-lists of ml_data_case_2 from converted numpy files.
 
     Args:
         root(string): Root directory where the bp files reside. The processed dataset will be saved in
             the same directory.
     """
-    def __init__(self, root, transform=None, pre_transform=None, pre_filter=None, idxnn=1, idxkk=1):
-        self.idxnn = idxnn
-        self.idxkk = idxkk
+    def __init__(self, root, idx_n=1, idx_k=1, transform=None, pre_transform=None, pre_filter=None):
+        self.idx_n = idx_n
+        self.idx_k = idx_k
         super(InMemoryDataset, self).__init__(root, transform, pre_transform, pre_filter)
-
-        print("processed_paths = ", self.processed_paths)
         self.data, self.slices = torch.load(self.processed_paths[0])
 
 
     @property
     def raw_file_names(self):
-        print("raw_file_name called")
-        return ['some_file_1', 'some_file_2', ...]
+        return [f"edge_index_all.pt",
+                f"weights.pt",
+                f"Btotal.pt",
+                f"xgc.3d.{(self.idx_n - 1):05d}.c.npz", 
+                f"xgc.3d.{self.idx_n:05d}.c.npz", 
+                f"xgc.3d.{self.idx_n:03d}{self.idx_k:02d}.npz" ]
+
 
     @property
     def processed_file_names(self):
-        print("processed_file_names called")
-        return [f"data_{self.idxnn:03d}{self.idxkk:02d}unnorm.pt"]
+        return [f"xgc_mlcase2_graphlist_{self.idx_n:03d}{self.idx_k:02d}.pt"] 
 
-    def _download(self):
-        pass
 
     def process(self):
-        # Read data into huge `Data` list.
-        #data_list = [...]
-
-        torch.set_default_dtype(torch.float64)
-        cuda = torch.device('cuda')
-
-        with np.load(join(data_dir, "xgc.mesh.npz")) as df:
-            coords = df["/coordinates/values"]
-            nextnode = df["nextnode"]
-            nc = df["/cell_set[0]/node_connect_list"]
-            
-        with np.load(join(data_dir, "xgc.bfield.npz")) as df:
-            Bvec = df["/node_data[0]/values"]
-
-
-        # Calculate the total magnetic field
-        Btotal = np.sqrt(np.sum(Bvec**2.0, axis=1))  # Total magnetic field, in T
-        # Get background density and temperature. Hard-code those for test cases.
-        ne0 = 1e19 # Background electron density, in m^-3
-        ni0 = 1e19 # Background ion density, in m^-3
-        Te0 = 2e3 # Background electron temperaure, in eV
-        Ti0 = 2e3 # Background ion temperature, in eV
-
-        print(f"Using hard-coded value for ne0: {ne0}m^-3")
-        print(f"Using hard-coded value for ni0: {ni0}m^-3")
-        print(f"Using hard-coded value for Te0: {Te0}eV")
-        print(f"Using hard-coded value for Ti0: {Ti0}eV")
-
-        mu0 = 4. * np.pi * 1e-7 # Vacuum permeability, in H/m
-        eps0 = 8.854e-12 # Vacuum permittivity, in F/m
-        e = 1.602e-19 # Elementary charge, in C
-        me = 9.109e-31 # Electron mass, in kg
-        mi = 1.67e-27 # Proton mass, in kg
-        c0 = 3e8 # Speed of light in m/s
-
-        VA = Btotal / np.sqrt(mu0 * mi * ni0)
-        VS = np.sqrt(e * Te0 / me)
-        wpe = np.sqrt(ne0 * e * e / me / eps0)
-        de = c0 / wpe
-
-        print(f"mean(VA) = {VA.mean():4.2e}m/s")
-        print(f"VS = {VS:4.2e}m/s")
-        print(f"omega_pe = {wpe:4.2e}Hz")
-        print(f"Skin depth de = {de:f}m")
-
-        # Set parallel and perpendicular normalizations
-        dt = 1e-8
-        norm_par = 0.5 * (VA + VS) * dt
-        norm_perp = de
-        rbf = lambda x: 1./np.sqrt(1. + x*x)
-
-        # Create the mesh and get the node connections
-        mesh = xgc_grid.xgc_mesh(nc, coords)
-        conns = xgc_grid.get_node_connection(nc, nextnode, local_plane=False)
-
-        nodes_per_plane = max(conns.keys()) + 1
+        X_key_list = ["eden", "iden", "u_e", "u_i", "dpot", "a_par", "apar_res", "pot_res"]
         num_planes = 8
-        num_vertices = nodes_per_plane * num_planes
-        print(f"Nodes per plane: {nodes_per_plane}, poloidal planes: {num_planes}")
+        fname_ei, fname_wts, fname_B, fname_prev, fname_conv, fname_iter = self.raw_paths
 
-        # Calculate connection weights based on cartesian distance an RBFs
-        all_weights_3 = []
-        for from_node in conns.keys():
-            dist_normed = xgc_grid.normalized_cartesian_distance(from_node, conns[from_node], coords, norm_par, norm_perp)
-            all_weights_3.append(dist_normed)
+        edge_index_all = torch.load(fname_ei)
+        weights = torch.load(fname_wts)
+        Btotal = torch.load(fname_B)
 
-        all_weights_3 = np.vstack(all_weights_3)
+        features_prev = {}
+        with np.load(join(self.root, fname_prev)) as df:
+            for key in ["eden", "iden", "u_e", "u_i", "dpot", "a_par"]:
+                features_prev[key] = df[key].T.flatten()
 
-        scaler_r = preprocessing.MinMaxScaler()
-        all_weights_3 = scaler_r.fit_transform(all_weights_3)
-
-        # Generate the weights tensor. Repeat the weights from the stencil of the first plane
-        weights = torch.tensor(all_weights_3)
-        weights = weights.repeat((num_planes, 1)).T
-
-        all_conns = []
-        for plane in range(num_planes):
-            for from_node in conns.keys():
-                rv = xgc_grid.shift_connections(from_node, conns[from_node], nodes_per_plane, plane, num_planes)
-                all_conns += rv
-
-        print(f"Calculating global edge index")
-        edge_index_all = torch.tensor(all_conns).contiguous().T
-
-        nn_idx = 727
-        kk_idx = 1
-
-        X_key_list = ["eden", "iden", "u_e", "u_i", "dpot", "a_par", "apar_res", 
-                    "pot_res", "apar_try", "pot_try", "apar_del", "pot_del"]
-
-
-        fname_conv = f"xgc.3d.{nn_idx:05d}.c.npz"
-        fname_iter = f"xgc.3d.{nn_idx:03d}{kk_idx:02d}.npz"
-
-        #with np.load(join(data_dir, fname_conv)) as df:
-        #    apar_conv = df["apar_try"]
-        #    dpot_conv = df["pot_try"]
-            
         # Compile feature vectors
-        node_features = {}
-        with np.load(join(data_dir, fname_iter)) as df:
+        features_node = {}
+        with np.load(join(self.root, fname_iter)) as df:
             for key in X_key_list:
-                node_features[key] = df[key].T.flatten() 
-            
-        node_features["B"] = np.tile(Btotal, (num_planes, 1)).T.flatten()
-        data_x = torch.tensor([v for v in node_features.values()]).T
+                features_node[key] = df[key].T.flatten() 
+            # Save apar_try and pot_try to calculate the error later
+            apar_try = df["apar_try"].T.flatten()
+            pot_try = df["pot_try"].T.flatten()
+
+        features_node["B"] = np.tile(Btotal, (num_planes, 1)).T.flatten() / Btotal.max()
+
+        eden_rel = features_node["eden"] / features_prev["eden"] - 1.0
+        iden_rel = features_node["iden"] / features_prev["iden"] - 1.0
+        ue_rel = features_node["u_e"] / features_prev["u_e"] - 1.0
+        ui_rel = features_node["u_i"] / features_prev["u_i"] - 1.0
+        apar_rel = features_node["a_par"] / features_prev["a_par"] - 1.0
+        dpot_rel = features_node["dpot"] / features_prev["dpot"] - 1.0
+        apar_res = features_node["apar_res"]
+        dpot_res = features_node["pot_res"] 
+        data_x = torch.tensor([features_node["B"], eden_rel, iden_rel, ue_rel, ui_rel, apar_rel, dpot_rel, apar_res, dpot_res]).T
 
         # Compile target features
-        target_features = {}
-        with np.load(join(data_dir, fname_conv)) as df:
-            target_features["apar_err"] = df["apar_try"].T.flatten() - node_features["apar_try"]
-            target_features["dpot_err"] = df["pot_try"].T.flatten() - node_features["pot_try"]
+        features_target = {}
+        with np.load(join(self.root, fname_conv)) as df:
+            features_target["apar_err"] = (df["apar_try"].T.flatten() - apar_try) 
+            features_target["dpot_err"] = (df["pot_try"].T.flatten() - pot_try) 
+        data_y = torch.tensor([v for v in features_target.values()]).T
 
-        data_y = torch.tensor([v for v in target_features.values()]).T
+        data_list = build_graph_list(data_x, data_y, edge_index_all, weights, cuda=True)
 
+        print(f"Build graph lists, len={len(data_list)}")
 
-        # # Generate graph list
-        edge_index_g = edge_index_all.cuda()
-        weights_g = weights.cuda()
+        if self.pre_filter is not None:
+            data_list = [data for data in data_list if self.pre_filter(data)]
 
-        graph_list = build_graph_list(data_x, data_y, edge_index_g, weights_g)
+        print(data_list)
 
-        torch.save(self.collate(graph_list), self.processed_paths[0])
+        if self.pre_transform is not None:
+            data_list = [self.pre_transform(data) for data in data_list]
 
-
-
-print("Processing...")
-
-
-
-
+        data, slices = self.collate(data_list)
+        torch.save((data, slices), self.processed_paths[0])
 
 
 # End of file pyg_xgc_loaders.py
