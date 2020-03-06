@@ -10,6 +10,9 @@ from os.path import join
 import numpy as np
 import torch
 from torch_geometric.data import InMemoryDataset, Data
+from torch_geometric import utils
+
+import networkx as nx
 
 from sklearn import preprocessing
 from itertools import product
@@ -17,6 +20,8 @@ from itertools import product
 sys.path.append("/home/rkube/software/adios2-release_25/lib64/python3.7/site-packages")
 import adios2
 from ..xgc_utils import xgc_grid, xgc_helpers
+
+
 
 
 def build_graph_weights(data_dir, weights_scaler, dt=1e-8, num_planes=8):
@@ -750,5 +755,152 @@ class XGC_it_dataset(InMemoryDataset):
         data, slices = self.collate(data_list)
         torch.save((data, slices), self.processed_paths[0])
 
+
+class XGC_it_dataset_kneighbor(InMemoryDataset):
+    r"""Loads the graph-lists of ml_data_case_2 from converted numpy files.
+
+    Args:
+        root(string): Root directory where the bp files reside. The processed dataset will be saved in
+            the same directory.
+    """
+    def __init__(self, root, idx_n=1, idx_k=1, depth=1, transform=None, pre_transform=None, pre_filter=None):
+        self.idx_n = idx_n
+        self.idx_k = idx_k
+        self.depth = depth
+        super(InMemoryDataset, self).__init__(root, transform, pre_transform, pre_filter)
+        self.data, self.slices = torch.load(self.processed_paths[0])
+
+
+    @property
+    def raw_file_names(self):
+        return [f"xgc.mesh.bp",
+                f"xgc.bfield.bp",
+                f"xgc.3d.{(self.idx_n - 1):05d}.c.npz", 
+                f"xgc.3d.{self.idx_n:05d}.c.npz", 
+                f"xgc.3d.{self.idx_n:03d}{self.idx_k:02d}.npz" ]
+
+
+    @property
+    def processed_file_names(self):
+        print("Called processed files")
+        return [f"xgc_mlcase2_depth{self.depth}_{self.idx_n:03d}{self.idx_k:02d}.pt"] 
+
+
+    def process(self):
+        X_key_list = ["eden", "iden", "u_e", "u_i", "dpot", "a_par", "apar_res", "pot_res"]
+        num_planes = 8
+        fname_mesh, fname_B, fname_prev, fname_conv, fname_iter = self.raw_paths
+
+        with adios2.open(join(self.root, "xgc.mesh.bp"), "r") as df:
+            coords = df.read("/coordinates/values")
+            nextnode = df.read("nextnode")
+            nc = df.read("/cell_set[0]/node_connect_list")
+            df.close()
+
+        with adios2.open(join(self.root, "xgc.bfield.bp"), "r") as df:
+            Bvec = df.read("/node_data[0]/values")
+            df.close()
+
+        # Calculate the total magnetic field
+        Btotal = np.sqrt(np.sum(Bvec**2.0, axis=1))  # Total magnetic field, in T
+        # Get background density and temperature. Hard-code those for test cases.
+        ne0 = 1e19 # Background electron density, in m^-3
+        ni0 = 1e19 # Background ion density, in m^-3
+        Te0 = 2e3 # Background electron temperaure, in eV
+        Ti0 = 2e3 # Background ion temperature, in eV
+
+        mu0 = 4. * np.pi * 1e-7 # Vacuum permeability, in H/m
+        eps0 = 8.854e-12 # Vacuum permittivity, in F/m
+        e = 1.602e-19 # Elementary charge, in C
+        me = 9.109e-31 # Electron mass, in kg
+        mi = 1.67e-27 # Proton mass, in kg
+        c0 = 3e8 # Speed of light in m/s
+
+        VA = Btotal / np.sqrt(mu0 * mi * ni0)
+        VS = np.sqrt(e * Te0 / me)
+        wpe = np.sqrt(ne0 * e * e / me / eps0)
+        de = c0 / wpe
+
+        # Set parallel and perpendicular normalizations
+        dt = 1e-8
+        norm_par = 0.5 * (VA + VS) * dt
+        norm_perp = de
+        rbf = lambda x: 1./np.sqrt(1. + x*x)
+        conns_3d = xgc_grid.get_node_connections_3d(nc, nextnode, 8)
+
+        #######################################################################################
+        # Load feature and target data from simulation data
+        features_prev = {}
+        with np.load(join(self.root, fname_prev)) as df:
+            for key in ["eden", "iden", "u_e", "u_i", "dpot", "a_par"]:
+                features_prev[key] = df[key].T.flatten()
+
+        # Compile feature vectors
+        features_node = {}
+        with np.load(join(self.root, fname_iter)) as df:
+            for key in X_key_list:
+                features_node[key] = df[key].T.flatten() 
+            # Save apar_try and pot_try to calculate the error later
+            apar_try = df["apar_try"].T.flatten()
+            pot_try = df["pot_try"].T.flatten()
+
+        features_node["B"] = np.tile(Btotal, (num_planes, 1)).T.flatten() / Btotal.max()
+
+        eden_rel = features_node["eden"] / features_prev["eden"] - 1.0
+        iden_rel = features_node["iden"] / features_prev["iden"] - 1.0
+        ue_rel = features_node["u_e"] / features_prev["u_e"] - 1.0
+        ui_rel = features_node["u_i"] / features_prev["u_i"] - 1.0
+        apar_rel = features_node["a_par"] / features_prev["a_par"] - 1.0
+        dpot_rel = features_node["dpot"] / features_prev["dpot"] - 1.0
+        apar_res = features_node["apar_res"]
+        dpot_res = features_node["pot_res"] 
+        data_x = torch.tensor([features_node["B"], eden_rel, iden_rel, ue_rel, ui_rel, apar_rel, dpot_rel, apar_res, dpot_res]).T
+
+        # Compile target features
+        features_target = {}
+        with np.load(join(self.root, fname_conv)) as df:
+            features_target["apar_err"] = (df["apar_try"].T.flatten() - apar_try) 
+            features_target["dpot_err"] = (df["pot_try"].T.flatten() - pot_try) 
+        data_y = torch.tensor([v for v in features_target.values()]).T
+
+        #######################################################################################
+        # Construct a graph from the global simulation domain
+        num_planes =  8
+        G = nx.Graph()
+
+        all_k = list(conns_3d.keys())
+        for k in all_k:
+            for j in conns_3d[k]:
+                G.add_edge(k, j)
+
+        graph_list = []
+
+        #######################################################################################
+        # Construct a sub-graphs with specified depth from the global simulation domain
+        #
+        for root_vtx in list(G.nodes):
+            subgraph = nx.Graph()
+            sub_edges = nx.algorithms.traversal.breadth_first_search.bfs_edges(G, source=root_vtx, depth_limit=self.depth)
+            for edge in sub_edges:
+                wt = xgc_grid.normalized_cartesian_distance_3d(edge[0], [edge[1]], coords, norm_par, norm_perp)
+                subgraph.add_edge(edge[0], edge[1], weight=rbf(wt))
+
+            # Now convert the nx graph into a pytorch-geometric structure
+            pyg_graph = utils.convert.from_networkx(subgraph)
+            pyg_graph.x = data_x[list(subgraph.nodes), :]
+            pyg_graph.y = data_y[list(subgraph.nodes), :]
+            pyg_graph.weight = pyg_graph.weight.squeeze(1)
+            pyg_graph.root_vtx = root_vtx
+            graph_list.append(pyg_graph)
+
+        if self.pre_filter is not None:
+            graph_list = [data for data in graph_list if self.pre_filter(data)]
+
+        if self.pre_transform is not None:
+            graph_list = [self.pre_transform(data) for data in graph_list]
+
+        data, slices = self.collate(graph_list)
+        print(f"Saving to {self.processed_paths[0]}")
+        torch.save((data, slices), self.processed_paths[0])
 
 # End of file pyg_xgc_loaders.py

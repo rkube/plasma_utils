@@ -271,15 +271,15 @@ def cartesian_distance(nodeidx0, conns, coords, num_planes=8):
     return(dist)
 
 
-def normalized_cartesian_distance(nodeidx0: int, conns: list, coords: np.ndarray, norm_par: np.ndarray, norm_perp: np.ndarray, num_planes: int =8) -> np.ndarray:
-    """Calculates the normalized cartesian distance from node nodeix0 to each item in conns. 
+def normalized_cartesian_distance(root_vtx: int, conns: list, coords: np.ndarray, norm_par: np.ndarray, norm_perp: np.ndarray, num_planes: int =8) -> np.ndarray:
+    """Calculates the normalized cartesian distance from node root_vtx to each item in conns. 
     The value to normalize is taken to be at the to-node. I.e. we assume that there is little variation
     in value we normalize to.
-    
+
     Input:
     ======
-    nodeidx0: int, from node
-    conns: list, to nodes
+    root_vtx: int, from node
+    conns: list, to nodes. 
     coords: array, shape(nnodes, 2). Vector of R,Z coordinates.
     norm_par: array, shape(nnodes)
     norm_perp: array, shape(nnodes)
@@ -290,24 +290,25 @@ def normalized_cartesian_distance(nodeidx0: int, conns: list, coords: np.ndarray
     distances: list of cartesian distances.
     """
     
-        
-    R0, Z0 = coords[nodeidx0]
+    print("USING THE NEW LAYOUT FOR conns, see get_node_connections_3d")
+
+    R0, Z0 = coords[root_vtx]
     # Create array from conection list
     conns_vec = np.array(conns)
-    R_vec = coords[conns_vec[:, 0], 0]
-    Z_vec = coords[conns_vec[:, 0], 1]
+    R_vec = coords[conns_vec, 0]
+    Z_vec = coords[conns_vec, 1]
     
     # Get perpendicular normalization
     # If we have passed a ndarray as the perpendicular normalization, we have to use only the
     # appropriate items.
-    norm_perp = norm_perp[conns_vec[:,0]]
+    norm_perp = norm_perp[conns_vec]
     
     # Multiply S_vec elementwise by 0 if c[1] == 0, by 1 if abs(c[1]) == 1
     S_mask = np.abs(conns_vec[:, 1])
     # Calculate all S values. Use the R value of the to-nodes
     S_vec = 2. * np.pi * R_vec / num_planes / 4.
     # Get the parallel normalization
-    norm_par = norm_par[conns_vec[:, 0]] 
+    norm_par = norm_par[conns_vec] 
 
     S_vec = S_vec * S_mask / norm_par
     
@@ -315,6 +316,54 @@ def normalized_cartesian_distance(nodeidx0: int, conns: list, coords: np.ndarray
     dist_Z = (Z_vec - Z0) / norm_perp
     dist_S = S_vec 
 
+    dist = np.stack((dist_R, dist_Z, dist_S), axis=1)
+
+    return(dist)
+
+def normalized_cartesian_distance_3d(root_vtx: int, conns: list, coords: np.ndarray, norm_par: np.ndarray, norm_perp: float, num_planes: int = 8) -> np.ndarray:
+    """Calculates the normalized cartesian distance from node root_vtx to each item in conns. 
+    The value to normalize is taken to be at the to-node. I.e. we assume that there is little variation
+    in value we normalize to.
+
+    Use this in combination with get_node_connections_3d
+    
+    Input:
+    ======
+    root_vtx: int, from vertex
+    conns: list, to vertices
+    coords: array, shape(nnodes, 2). Vector of R,Z coordinates.
+    norm_par: shape(nnodes), Parallel normalization (depends on B!)
+    norm_perp: Perpendicular normalization constant
+    num_planes: int, number of toroidal planes
+    
+    Returns:
+    ========
+    distances: list of cartesian distances.
+    """
+    
+    num_vtx = coords.shape[0] 
+
+    R0, Z0 = coords[np.mod(root_vtx, num_vtx)]
+    # Create array from conection list
+    conns_vec = np.array(conns)
+    R_vec = coords[np.mod(conns_vec, num_vtx), 0]
+    Z_vec = coords[np.mod(conns_vec, num_vtx), 1]
+     
+    # Find the z-planes on which each vertex lies
+    zplane_root = root_vtx // num_vtx
+    zplane_conns = conns_vec // num_vtx
+    
+    zplane_delta = np.abs(zplane_conns - zplane_root)    
+    
+    # Calculate all S values. Use the R value of the to-nodes
+    S_vec = 2. * np.pi * R_vec * zplane_delta / num_planes / 4.
+    # Get the parallel normalization
+    norm_par = norm_par[np.mod(conns_vec, num_vtx)] 
+
+    dist_R = (R_vec - R0) / norm_perp
+    dist_Z = (Z_vec - Z0) / norm_perp
+    dist_S = S_vec / norm_par
+    
     dist = np.stack((dist_R, dist_Z, dist_S), axis=1)
 
     return(dist)
