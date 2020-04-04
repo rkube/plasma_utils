@@ -1,6 +1,18 @@
 # -*- Encoding: UTF-8 -*-
 
 import numpy as np
+import torch
+import networkx as nx
+from torch_geometric.data import Data
+
+from .subgraphs import build_subgraph
+
+def nan_filter(data):
+    """Returns
+    True, if no element of array is nan
+    False if any element of array is nan."""
+    return ~torch.any(torch.isnan(data.x))
+
 
 def sqrt3_trf(X, subtract_med=True):
     """Transforms data as Y = sgn(X) |X|^(1/3)
@@ -73,7 +85,8 @@ class sqrt13_rescaled_subgraph():
         newdata = Data(x=data.x.clone(),
                        edge_attr=data.edge_attr,
                        edge_index=data.edge_index,
-                       weight=data.weight)
+                       weight=data.weight,
+                       root_vtx=data.root_vtx)
 
         newdata.x[:, 1:] = torch.sign(newdata.x[:, 1:]) * torch.abs(newdata.x[:, 1:]).pow(1./3.)
         newdata.x[:, -2] = newdata.x[:, -2] / self.apar_res_std
@@ -95,52 +108,12 @@ class sqrt13_rescaled_subgraph():
 
         if self.depth:
             for depth in range(1, self.depth + 1):
-                ei_sub, wt_sub = self.build_subgraph(newdata.edge_index, data.weight, level=depth)
+                ei_sub, wt_sub = build_subgraph(newdata.edge_index, data.weight, depth=depth)
+
                 setattr(newdata, f"edge_index_{depth:1d}", ei_sub)
                 setattr(newdata, f"weight_{depth:1d}", wt_sub)
 
         return newdata
 
-    def build_subgraph(self, edge_index, weight, level=2):
-        """Constructs subgraph from level-2 nodes to level-1 nodes.
-
-        """
-
-        # Construct an networkX graph from the current edge_index
-        my_G = nx.Graph()
-        for i, j in zip(edge_index[0,:], edge_index[1,:]):
-            my_G.add_edge(i.item(), j.item())
-
-        # Recursively find connections from the root_vertex (0), up to vertices
-        # 2 edges away. Store results in nb_dict
-        nb_dict = {}
-        get_neighbors(my_G, 0, [], level, nb_dict)
-
-        # Construct an edge_index and weight structure of the vertices 2 nodes away
-        # from the root vertex to the vertex 1 node away. Keep the weight of the connections.
-
-        # Get the total number of edges for k=2 nodes from the dictionary
-        num_edges = 0
-        for g in nb_dict[2]:
-            num_edges += len(g[1])
-
-        # Define empty edge_index and weight tensors that will hold the connections
-        ei_sub = torch.zeros([2, num_edges], dtype=torch.long)
-        wt_sub = torch.zeros([num_edges, 3])
-
-        edge_ctr = 0
-
-        for g in nb_dict[2]:
-            cur_edges = len(g[1])
-            for idx_e in range(edge_ctr, edge_ctr + cur_edges):
-                ei_sub[0, idx_e] = g[0]
-                ei_sub[1, idx_e] = g[1][idx_e - edge_ctr]
-
-                widx = get_edge_index(g[0], g[1][idx_e - edge_ctr], edge_index)
-                wt_sub[idx_e, :] = weight[widx, :]
-
-            edge_ctr += cur_edges
-
-        return ei_sub, wt_sub
 
 # End of file transformations.py

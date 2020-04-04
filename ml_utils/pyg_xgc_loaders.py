@@ -763,12 +763,12 @@ class XGC_it_dataset_kneighbor(InMemoryDataset):
         root(string): Root directory where the bp files reside. The processed dataset will be saved in
             the same directory.
     """
-    def __init__(self, root, idx_n=1, idx_k=1, depth=1, transform=None, pre_transform=None, pre_filter=None):
+    def __init__(self, root, idx_n=1, idx_k=1, depth=1, transform=None, pre_transform=None, pre_filter=None, map_location=None):
         self.idx_n = idx_n
         self.idx_k = idx_k
         self.depth = depth
         super(InMemoryDataset, self).__init__(root, transform, pre_transform, pre_filter)
-        self.data, self.slices = torch.load(self.processed_paths[0])
+        self.data, self.slices = torch.load(self.processed_paths[0], map_location=map_location)
 
 
     @property
