@@ -4,6 +4,58 @@ import torch
 import torch.nn.functional as F
 
 
+def train_reg(loader, optimizer, model):
+    """Training for the regression-only loss.
+
+    Parameters:
+    -----------
+    loader: torch_geometric.data.DataLoader
+    optimizer: torch.optim
+    model: torch.nn
+
+    Returns:
+    --------
+    float, loss for current batch
+    """
+    model.train()
+    loss_all = 0.0
+
+    for data in loader:
+        optimizer.zero_grad()
+        out = model(data)
+        loss = F.mse_loss(out, data.y, reduction="mean")
+        loss.backward()
+        optimizer.step()
+
+        loss_all += loss.item()
+
+    return(loss_all / len(loader))
+
+
+def validate_reg(loader, model):
+    """Calculates avg. cross-entropy loss for classification and L2 loss for regression.
+
+    Parameters:
+    -----------
+    loader: torch_geometric.data.DataLoader
+    model: torch.nn
+
+    Returns:
+    --------
+    float, loss of current batch
+    """
+
+    model.eval()
+    loss_all = 0.0
+    for data in loader:
+        with torch.no_grad():
+            out = model(data)
+            loss = F.mse_loss(out, data.y, reduction="mean")
+            loss_all += loss.item()
+
+    return(loss_all / len(loader))
+
+
 def train_class_reg(loader, optimizer, model, device, alpha:float=1.0):
     """Training for the split classification/regression model.
 

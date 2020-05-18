@@ -23,6 +23,7 @@ class gridsearch_params(dict):
                  optim=None,
                  lr_start=None,
                  batch_size=None,
+                 slurm_id=None,
                  epochs=None):
 
         assert(isdir(basedir))
@@ -53,6 +54,7 @@ class gridsearch_params(dict):
                          "optim": optim,
                          "lr_start": lr_start,
                          "batch_size": batch_size,
+                         "slurm_id": slurm_id,
                          "epochs": epochs}
 
 

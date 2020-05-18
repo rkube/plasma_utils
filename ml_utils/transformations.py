@@ -116,4 +116,64 @@ class sqrt13_rescaled_subgraph():
         return newdata
 
 
+class subgraphs():
+    """Adds k-depth neighborhoods to a data object."""
+    def __init__(self, depth):
+        self.depth = depth
+
+    def __call__(self, data):
+        """Builds k-depth subgraphs appends them to the data structure."""
+
+        for depth in range(1, self.depth + 1):
+            ei_sub, wt_sub = build_subgraph(data.edge_index, data.weight, depth=depth)
+
+            setattr(data, f"edge_index_{depth:1d}", ei_sub)
+            setattr(data, f"weight_{depth:1d}", wt_sub)
+
+        return data
+
+
+class apply_transform_x():
+    """Applies a transformation to the data."""
+
+    def __init__(self, trf, idx, which):
+        self.trf = trf
+        self.idx = idx
+
+    def __call__(self, data):
+        values = np.expand_dims(data.x[:, self.idx].numpy(), 1)
+        if self.idx == 7:
+            values = values * 1e13
+        elif self.idx == 8:
+            values = values * 1e7
+
+        data.x[:, self.idx] = torch.as_tensor(self.trf.transform(values).squeeze())
+
+        return data
+
+
+class apply_transform_y():
+    """Applies transformation for regression target.
+    Transform both regression targets simultaneously so that we can clip the target
+    vector size to only include the root-vertex target."""
+
+    def __init__(self, trf_y0, trf_y1):
+        self.trf_y0 = trf_y0
+        self.trf_y1 = trf_y1
+
+    def __call__(self, data):
+        # Get regression targets for the root vertex, multiply by 1e13/1e7 and
+        # apply quantile transformation
+        values = data.y[0, :].numpy()
+        #print("Input ", values)
+        y0 = self.trf_y0.transform((values[0] * 1e16).reshape(1, -1)).item()
+        y1 = self.trf_y1.transform((values[1] * 1e8).reshape(1, -1)).item()
+
+        data.y = torch.tensor([[y0, y1]])
+        #data.y = torch.tensor([[-1.0, 2.0]])
+        #print("Output: ", data.y)
+
+        return data
+
+
 # End of file transformations.py
