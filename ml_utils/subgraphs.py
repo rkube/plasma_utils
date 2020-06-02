@@ -7,9 +7,9 @@ def get_edge_index(node_to: int, node_from: int, edge_index: torch.tensor) -> in
     """Returns the column in edge_index corresponding to the edge (node_to, node_from)."""
     idx_to = edge_index[0, :] == node_to
     idx_fr = edge_index[1, :] == node_from
-     
+
     idx_abs = torch.nonzero(idx_to & idx_fr).squeeze().item()
-    
+
     return(idx_abs)
 
 
@@ -21,12 +21,30 @@ def get_neighbors(G, root_node: int, excl_list: list, depth: int, nb_dict: dict,
         nb_dict[maxdepth + 1 - depth].append((root_node, neighbor_set_k))
     except:
         nb_dict[maxdepth + 1 - depth] = [(root_node, neighbor_set_k)]
-   
+
     if depth > 0:
         for n in neighbor_set_k:
             get_neighbors(G, n, excl_list + [root_node], depth - 1, nb_dict, maxdepth)
     else:
         return nb_dict
+
+def kneighbor_squashed(root_vtx: int, conns_3d: dict, neighbors: set, k: int=2):
+    """Generates a 'squashed' neighborhood of root_vtx where all nodes that can
+    be reached through by max k edges.
+    """
+
+    assert((k >= 1) & (k <= 5))
+    if k == 1:
+        # This terminates the recursion. Add only the nearest neighbors of the root vertex
+        # to the neighbors set
+        for vtx in conns_3d[root_vtx]:
+            neighbors.add(vtx)
+    else:
+        for vtx in conns_3d[root_vtx]:
+            neighbors = kneighbor_squashed(vtx, conns_3d, neighbors, k - 1)
+
+    return neighbors
+
 
 
 # Code below builds directed subgraphs from k=2 nodes to k=1 nodes.
@@ -74,7 +92,7 @@ def build_subgraph(edge_index: torch.tensor, weight: torch.tensor, depth: int=2)
 
     for g in nb_dict[depth]:
         cur_edges = len(g[1])
-        for idx_e in range(edge_ctr, edge_ctr + cur_edges): 
+        for idx_e in range(edge_ctr, edge_ctr + cur_edges):
             ei_sub[0, idx_e] = g[0]
             ei_sub[1, idx_e] = g[1][idx_e - edge_ctr]
 
@@ -87,8 +105,6 @@ def build_subgraph(edge_index: torch.tensor, weight: torch.tensor, depth: int=2)
 
 
 
-
-
 def build_subgraphs_lvl1(G):
     neighbor_set_0 = G[0]
     edge_index_1_list = []
@@ -98,12 +114,12 @@ def build_subgraphs_lvl1(G):
     for k in neighbor_set_0:
         neighbor_set_1 =  [k2 for k2 in G[k] if k2 not in [0]]
         num_edges = len(neighbor_set_1)
-        
+
         # Build an edge index and copy the features and weights from the original graph
         ei_sub = torch.zeros([2, num_edges], dtype=torch.long)
         wt_sub = torch.zeros([num_edges, 3], dtype=torch.float64)
-        
-        
+
+
         ei_sub[0, :] = k
         for ll in range(num_edges):
             ei_sub[1, ll] = neighbor_set_1[ll]
@@ -112,16 +128,15 @@ def build_subgraphs_lvl1(G):
 
         edge_index_1_list.append(ei_sub)
         weights_1_list.append(wt_sub)
-            
+
         #print(neighbor_set_1, ei_sub, wt_sub)
         #subgraph_list.append(Data(x=graph_list[gidx].x, edge_index=ei_sub, weight=wt_sub))
-        
+
     #print(edge_index_1_list)
     #print(weights_1_list)
     ei_lvl1 = torch.cat(edge_index_1_list, dim=1)
     wt_lvl1 = torch.cat(weights_1_list, dim=0)
-    
+
     subgraph_lvl1 = Data(x=graph_list[gidx].x, edge_index=ei_lvl1, weight=wt_lvl1)
-        
+
     return(subgraph_lvl1)
-        

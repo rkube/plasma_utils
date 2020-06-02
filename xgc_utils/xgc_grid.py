@@ -202,7 +202,7 @@ def get_node_connections_3d(conns: np.ndarray, nextnode: np.ndarray, num_planes 
     assert(conns.min() == 0)
 
     # Iterate over all vertices.
-    for vertex in range(conns.max()):
+    for vertex in range(vtx_per_plane):
         # 1) Find all triangles which include the current vertex
         # Since each vertex occurs either 0 or 1 time in a triangle, each row
         # returned from np.argwhere is unique.
@@ -271,7 +271,7 @@ def cartesian_distance(nodeidx0, conns, coords, num_planes=8):
     return(dist)
 
 
-def normalized_cartesian_distance(root_vtx: int, conns: list, coords: np.ndarray, norm_par: np.ndarray, norm_perp: np.ndarray, num_planes: int =8) -> np.ndarray:
+def normalized_cartesian_distance(root_vtx: int, conns: list, coords: np.ndarray, norm_par: np.ndarray, norm_perp: np.ndarray, num_planes: int=8) -> np.ndarray:
     """Calculates the normalized cartesian distance from node root_vtx to each item in conns.
     The value to normalize is taken to be at the to-node. I.e. we assume that there is little variation
     in value we normalize to.
@@ -327,7 +327,7 @@ def normalized_cartesian_distance_old(nodeidx0, conns, coords, norm_par, norm_pe
      in value we normalize to.
 
      This is the old version of this code. It assumes allows for scalar as well as vector
-     norm_perp and norm_par. 
+     norm_perp and norm_par.
 
      Input:
      ======
