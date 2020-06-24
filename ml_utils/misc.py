@@ -20,10 +20,10 @@ def train_reg(loader, optimizer, model):
     model.train()
     loss_all = 0.0
 
-    for data in loader:
+    for batch in loader:
         optimizer.zero_grad()
-        out = model(data)
-        loss = F.mse_loss(out, data.y, reduction="mean")
+        out = model(batch)
+        loss = F.mse_loss(out, batch.y, reduction="mean")
         loss.backward()
         optimizer.step()
 
@@ -47,10 +47,10 @@ def validate_reg(loader, model):
 
     model.eval()
     loss_all = 0.0
-    for data in loader:
+    for batch in loader:
         with torch.no_grad():
-            out = model(data)
-            loss = F.mse_loss(out, data.y, reduction="mean")
+            out = model(batch)
+            loss = F.mse_loss(out, batch.y, reduction="mean")
             loss_all += loss.item()
 
     return(loss_all / len(loader))

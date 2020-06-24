@@ -13,6 +13,10 @@ def nan_filter(data):
     False if any element of array is nan."""
     return ~torch.any(torch.isnan(data.x))
 
+def zero_filter(data, eps=1e-22):
+    """Discard the data object if the target values are below a threshold."""
+    return ~torch.any(torch.abs(data.y) < eps)
+
 
 def sqrt3_trf(X, subtract_med=True):
     """Transforms data as Y = sgn(X) |X|^(1/3)
@@ -136,20 +140,27 @@ class subgraphs():
 class apply_transform_x():
     """Applies a transformation to the data."""
 
-    def __init__(self, trf, idx, which):
+    def __init__(self, trf, idx):
         self.trf = trf
         self.idx = idx
-
-    def __call__(self, data):
-        values = np.expand_dims(data.x[:, self.idx].numpy(), 1)
+        self.factor = None
         if self.idx == 7:
-            values = values * 1e13
+            self.factor = 1e13
         elif self.idx == 8:
-            values = values * 1e7
+            self.factor = 1e7
+        else:
+            self.factor = 1.0
 
-        data.x[:, self.idx] = torch.as_tensor(self.trf.transform(values).squeeze())
+    def __call__(self, data_orig):
 
-        return data
+        new_data = Data(x=data_orig.x.clone().detach(),
+                        y=data_orig.y.clone().detach(),
+                        edge_index=data_orig.edge_index.clone().detach(),
+                        edge_attr=data_orig.edge_attr.clone().detach(),
+                        root_vtx=data_orig.root_vtx)
+        values = np.expand_dims(data_orig.x[:, self.idx].numpy() * self.factor, 1)
+        new_data.x[:, self.idx] = torch.as_tensor(self.trf.transform(values).squeeze())
+        return new_data
 
 
 class apply_transform_y():
@@ -161,19 +172,19 @@ class apply_transform_y():
         self.trf_y0 = trf_y0
         self.trf_y1 = trf_y1
 
-    def __call__(self, data):
+    def __call__(self, data_orig):
         # Get regression targets for the root vertex, multiply by 1e13/1e7 and
         # apply quantile transformation
-        values = data.y[0, :].numpy()
-        #print("Input ", values)
+        new_data = Data(x=data_orig.x.clone().detach(),
+                        edge_index=data_orig.edge_index.clone().detach(),
+                        edge_attr=data_orig.edge_attr.clone().detach(),
+                        root_vtx=data_orig.root_vtx)
+        values = data_orig.y[0, :].numpy()
         y0 = self.trf_y0.transform((values[0] * 1e16).reshape(1, -1)).item()
         y1 = self.trf_y1.transform((values[1] * 1e8).reshape(1, -1)).item()
+        new_data.y = torch.tensor([[y0, y1]])
 
-        data.y = torch.tensor([[y0, y1]])
-        #data.y = torch.tensor([[-1.0, 2.0]])
-        #print("Output: ", data.y)
-
-        return data
+        return new_data
 
 
 # End of file transformations.py

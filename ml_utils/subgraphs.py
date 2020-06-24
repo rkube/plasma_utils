@@ -41,7 +41,11 @@ def kneighbor_squashed(root_vtx: int, conns_3d: dict, neighbors: set, k: int=2):
             neighbors.add(vtx)
     else:
         for vtx in conns_3d[root_vtx]:
-            neighbors = kneighbor_squashed(vtx, conns_3d, neighbors, k - 1)
+            try:
+                neighbors = kneighbor_squashed(vtx, conns_3d, neighbors, k - 1)
+            except KeyError:
+                print(f"Vertex {vtx} has no immediate neighbors")
+
 
     return neighbors
 

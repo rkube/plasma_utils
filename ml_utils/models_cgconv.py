@@ -227,4 +227,46 @@ class CGNet_GRU_plain_01(torch.nn.Module):
 
         return(x)
 
+class CGNet_squashed(torch.nn.Module):
+    """Flattened CGNet that feeds data from all depth neighborhoods through the
+       same convolutional layer."""
+    def __init__(self, n_features: int, n_edge:int, conv_dim:int=64):
+        super(CGNet_squashed, self).__init__()
+
+        self.fc1 = torch.nn.Linear(9, conv_dim)
+
+        # OBS: root_weight needs to be false. We already account for by including a self-loop
+        # to the root vertex in edge_index
+        self.conv_l1 = CGConv(conv_dim, n_edge, aggr="mean", flow="target_to_source")
+
+        self.fc2 = torch.nn.Linear(conv_dim, conv_dim)
+
+        self.fc3 = torch.nn.Linear(conv_dim, 64)
+        self.fc4 = torch.nn.Linear(64, 2)
+
+    def forward(self, data):
+        #batch_g = data.batch.to(device="cuda")
+
+        x = F.relu(self.fc1(data.x))
+        x = F.dropout(x, p=0.15, training=self.training)
+
+        x = self.conv_l1(x, data.edge_index, data.edge_attr)
+        x = F.relu(x)
+
+        # For the dataset at hand, the index of the center node is always at the beginning
+        # of the batch. Find the index where each unique element in the batch occurs first
+        # and use this as an index array to get the new features at the center node
+        idx_ct = torch.cat([(data.batch == u).nonzero()[0] for u in torch.unique(data.batch)])
+        x = x[idx_ct, :]
+
+        # x is the convolution over the entire graphlet.
+        # We only need to forward the x-values at the center nodes.
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+
+
+        x = self.fc4(x)
+
+        return(x)
+
 # End of file models_cgconv.py
