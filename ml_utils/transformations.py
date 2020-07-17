@@ -187,4 +187,34 @@ class apply_transform_y():
         return new_data
 
 
+class apply_transform():
+    """Applies a transformation to the data."""
+
+    def __init__(self, trf_x_list, idx_x_list, trf_y_list):
+        self.trf_x_list = trf_x_list
+        self.idx_x_list = idx_x_list
+        self.trf_y_list = trf_y_list
+
+
+    def __call__(self, data_orig):
+
+        new_data_x = torch.zeros_like(data_orig.x)
+        new_data_y = torch.zeros_like(data_orig.y)
+
+        for trf, idx in zip(self.trf_x_list, self.idx_x_list):
+            values = np.expand_dims(data_orig.x[:, idx].numpy(), 1)
+            new_data_x[:, idx] = torch.as_tensor(trf.transform(values).squeeze())
+
+        for trf, idx in zip(self.trf_y_list, [0, 1]):
+            values = np.expand_dims(data_orig.y[:, idx].numpy(), 1)
+            new_data_y[:, idx] = torch.as_tensor(trf.transform(values).squeeze())
+
+        new_data = Data(x=new_data_x,
+                        y=new_data_y,
+                        edge_index=data_orig.edge_index.clone().detach(),
+                        root_vtx=data_orig.root_vtx)
+
+        return new_data
+
+
 # End of file transformations.py
