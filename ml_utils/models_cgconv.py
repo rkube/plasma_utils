@@ -269,4 +269,62 @@ class CGNet_squashed(torch.nn.Module):
 
         return(x)
 
+
+class CGNet_flatten_GRU_v02(torch.nn.Module):
+    """This is the version used with a refactored version of the ML data loading
+    routines. That is the ones using routines
+    * load_simulation_data
+    * StandardScalers
+    * zero_filter
+    * my_scaler
+
+    """Flattened CGNet that feeds data from all depth neighborhoods through the
+       same convolutional layer."""
+    def __init__(self, n_features: int, n_edge:int, conv_dim:int=64):
+        super(CGNet_flatten_GRU, self).__init__()
+
+        #self.depth = depth
+
+        self.fc1 = torch.nn.Linear(9, conv_dim)
+
+        # OBS: root_weight needs to be false. We already account for by including a self-loop
+        # to the root vertex in edge_index
+        self.conv_l1 = CGConv(conv_dim, n_edge, aggr="mean", flow="target_to_source")
+
+        self.gru_l1 = GRU(conv_dim, conv_dim)
+
+        self.fc2 = torch.nn.Linear(conv_dim, conv_dim)
+
+        self.fc3 = torch.nn.Linear(conv_dim, 64)
+        self.fc4 = torch.nn.Linear(64, 2)
+
+    def forward(self, data, root_offset):
+        """
+        Parameters:
+        -----------
+        data........: batch with tensor x: dim0: num samples, dim
+        root_offset.: indices where the root nodes are located in the current batch
+        """
+        x = F.relu(self.fc1(data.x))
+        x = F.dropout(x, p=0.15, training=self.training)
+        h = x.unsqueeze(0)
+
+        for i in range(3):
+            m = self.conv_l1(x, data.edge_index, data.edge_attr)
+            x, h = self.gru_l1(m.unsqueeze(0), h)
+            x = x.squeeze(0)
+        # x is the convolution over the entire graphlet.
+        # We only need to forward the x-values at the center nodes.
+
+        x = F.relu(x[root_offset, :])
+
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+
+
+        x = self.fc4(x)
+
+        return(x)
+
+
 # End of file models_cgconv.py

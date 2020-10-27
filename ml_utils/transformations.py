@@ -18,6 +18,35 @@ def zero_filter(data, eps=1e-22):
     return ~torch.any(torch.abs(data.y) < eps)
 
 
+def zero_filter_v02(graph, eps=1e-22):
+    """Returns the index of the root-vertex in the current graph.
+    Used by XGC_kneighbor_squashed_v2 used for initial ray-tune runs. As of October 2020."""
+    self_idx = torch.where(graph.edge_index[1,:] == graph.edge_index[0,0] )[0].item()
+    return torch.all(torch.abs(graph.y[self_idx]) > 1e-30).item()
+
+
+class my_scaler():
+    """The scaler used by XGC_kneighbor_squashed_v2 for initial ray-tune runs.
+    As of October 2020."""
+    def __init__(self, scaler_x, scaler_y):
+        self.scaler_x = scaler_x
+        self.scaler_y = scaler_y
+
+    def __call__(self, data_orig):
+        new_data_x = self.scaler_x.transform(data_orig.x.numpy())
+        new_data_y = self.scaler_y.transform(data_orig.y.numpy())
+
+        new_data = Data(edge_index=data_orig.edge_index.clone(),
+                        root_vtx=data_orig.root_vtx,
+                        root_vtx_idx=data_orig.root_vtx_idx,
+                        edge_attr=data_orig.edge_attr.clone(),
+                        x=torch.tensor(new_data_x),
+                        y=torch.tensor(new_data_y))
+
+        return new_data
+
+
+
 def sqrt3_trf(X, subtract_med=True):
     """Transforms data as Y = sgn(X) |X|^(1/3)
 

@@ -9,16 +9,18 @@ sys.path.insert(0,parentdir)
 
 import numpy as np
 import torch
-import timeit
+import time
 from torch_geometric.data import InMemoryDataset, Data
 from torch_geometric import utils
 
 from sklearn import preprocessing
 from itertools import product
 
-sys.path.append("/home/rkube/software/adios2-devel/lib/python3.8/site-packages")
+sys.path.append("/home/rkube/software/gcc/8.3/adios2/lib/python3.8/site-packages")
+#sys.path.append("/home/rkube/software/gcc/8.3/python3.7/adios2/lib/python3.7/site-packages")
 import adios2
 from xgc_utils import xgc_grid, xgc_helpers
+from .grid_graphs import xgc_grid_squashed
 from .subgraphs import kneighbor_squashed
 
 ################################################################################
@@ -26,6 +28,53 @@ from .subgraphs import kneighbor_squashed
 #        Loaders for models that include data from multiple iterations         #
 #                                                                              #
 ################################################################################
+
+
+def load_simulation_data(data_dir, idx_nn, idx_kk, num_planes=8, X_key_list=["eden", "iden", "u_e", "u_i", "dpot", "a_par", "apar_res", "pot_res"]):
+    """Load simulation data from a time-step idx_nn and iteration idx_kk.
+
+    Parameters:
+    -----------
+    data_dir..: Data directory of the simulation
+    idx_nn....: time-step index
+    idx_kk....: iteration index
+    X_key_list: Keys to load as node features
+    """
+
+    # Datafile that stores result of the converged iteration
+    fname_conv = f"xgc.3d.{idx_nn:05d}.c.npz"
+    # Datafile that stores apar_try and dpot_try in iteration k
+    fname_iter = f"xgc.3d.{idx_nn:03d}{idx_kk:02d}.npz"
+
+    features_node = {}
+    features_target = {}
+
+    with adios2.open(join(data_dir, "xgc.bfield.bp"), "r") as df:
+        Bvec = df.read("/node_data[0]/values")
+        df.close()
+    # Calculate the total magnetic field
+    Btotal = np.sqrt(np.sum(Bvec**2.0, axis=1))
+    features_node["B"] = np.tile(Btotal, (num_planes, 1)).T.flatten() / Btotal.max()
+
+    with np.load(join(data_dir, "raw", fname_iter)) as df:
+        for key in X_key_list:
+            features_node[key] = df[key].T.flatten()
+        # Save apar_try and pot_try to calculate the error later
+        apar_try = df["apar_try"].T.flatten()
+        pot_try = df["pot_try"].T.flatten()
+
+    # Define the error as err:= real_solution - current_iteration
+    with np.load(join(data_dir, "raw", fname_conv)) as df:
+        features_target["apar_err"] = (df["apar_try"].T.flatten() - apar_try)
+        features_target["dpot_err"] = (df["pot_try"].T.flatten() - pot_try)
+        # Iterate over keys in X_key_list to ensure the features are ordered correctly
+    data_x = np.array([features_node[key] for key in ["B"] + X_key_list]).T
+
+    data_y = np.array([features_target["apar_err"],
+                       features_target["dpot_err"]]).T
+
+    return (data_x, data_y)
+
 
 class XGC_squashed_iter(InMemoryDataset):
     r"""Uses squashed graph neighborhoods where the root vertex connects directly
@@ -108,7 +157,7 @@ class XGC_squashed_iter(InMemoryDataset):
         for idx_k, fname_iter in zip(self.idx_k_list, fname_iter_list):
             print(f"Collecting data for iteration {idx_k:02d}")
 
-            tic = timeit.default_timer()
+            tic = time.perf_counter()
             features_node = {}
             with np.load(join(self.root, fname_iter)) as df:
                 for key in X_key_list:
@@ -139,7 +188,7 @@ class XGC_squashed_iter(InMemoryDataset):
                     features_target["dpot_err"] = (df["pot_try"].T.flatten() - pot_try)
                 data_y = torch.tensor([v for v in features_target.values()]).T
 
-            toc = timeit.default_timer()
+            toc = time.perf_counter()
             print(f"Compiling features took {(toc-tic):6.4f}s")
 
         #########################################################################
@@ -148,7 +197,7 @@ class XGC_squashed_iter(InMemoryDataset):
         # List of all graphs
         graph_list = []
 
-        tic = timeit.default_timer()
+        tic = time.perf_counter()
         # Iterate over vertices and build the squashed neighborhood
         for root_vtx in all_vertices:
             neighbors = set()
@@ -189,22 +238,22 @@ class XGC_squashed_iter(InMemoryDataset):
                                    x=None, y=data_y[root_vtx, :], root_vtx=root_vtx,
                                    **x_dict))
 
-        toc = timeit.default_timer()
+        toc = time.perf_counter()
         num_graphs = len(graph_list)
 
         print(f"Compiling {num_graphs:05d} graphs took {(toc-tic):6.3f}s")
 
-        tic = timeit.default_timer()
+        tic = time.perf_counter()
         if self.pre_filter is not None:
             graph_list = [graph for graph in graph_list if self.pre_filter(graph)]
-        toc = timeit.default_timer()
+        toc = time.perf_counter()
         num_graphs_filtered = len(graph_list)
         print(f"Applying pre-filter took {(toc - tic):6.4f}s - {num_graphs_filtered} graphs in list")
 
-        tic = timeit.default_timer()
+        tic = time.perf_counter()
         if self.pre_transform is not None:
             graph_list = [self.pre_transform(data) for data in graph_list]
-        toc = timeit.default_timer()
+        toc = time.perf_counter()
         print(f"Applying pre-transform took {(toc - tic):6.4f}s")
 
         data, slices = self.collate(graph_list)
@@ -213,6 +262,75 @@ class XGC_squashed_iter(InMemoryDataset):
 
 
 
+class XGC_kneighbor_squashed_v2(InMemoryDataset):
+    r"""Uses squashed graph neighborhoods where the root vertex connects directly
+    to all vertices at max k edges away.
+
+    Uses xgc_grid_squashed class, which pre-computes the k-neighborhoods.
+
+    Args:
+        root(string): Root directory where the bp files reside. The processed dataset will be saved in
+            the same directory.
+    """
+    def __init__(self, root, idx_n=1, idx_k=1, depth=1, transform=None, pre_transform=None, pre_filter=None):
+        self.idx_n = idx_n
+        self.idx_k = idx_k
+        self.depth = depth
+        self.my_xgc_grid = xgc_grid_squashed(root, depth=self.depth)
+        super(InMemoryDataset, self).__init__(root, transform, pre_transform, pre_filter)
+        self.data, self.slices = torch.load(self.processed_paths[0])
+
+
+    @property
+    def raw_file_names(self):
+        return [f"xgc.3d.{self.idx_n:05d}.c.npz",
+                f"xgc.3d.{self.idx_n:03d}{self.idx_k:02d}.npz" ]
+
+    @property
+    def processed_file_names(self):
+        return [f"xgc_kneighbor_squashed_norm2_depth{self.depth}_{self.idx_n:03d}{self.idx_k:02d}.pt"]
+
+
+    def process(self):
+        print("Called process")
+        num_planes = 8
+        fname_conv, fname_iter = self.raw_paths
+
+        data_x, data_y = load_simulation_data(self.root, self.idx_n, self.idx_k)
+        data_x = torch.tensor(data_x)
+        data_y = torch.tensor(data_y)
+
+        #########################################################################
+        # Construct squashed sub-graphs with specified depth
+        #
+        graph_list = []
+
+        for root_vtx, neighbors in self.my_xgc_grid.k_neighbors.items():
+            weights = self.my_xgc_grid.weights(root_vtx)
+            edge_index = self.my_xgc_grid.gen_edge_index(root_vtx)
+            root_vtx_idx = self.my_xgc_grid.root_vertex_idx(edge_index)
+            graph_list.append(Data(edge_index=edge_index, edge_attr=torch.DoubleTensor(weights),
+                                   x=data_x[neighbors, :], y=data_y[neighbors, :],
+                                   root_vtx=root_vtx, root_vtx_idx=root_vtx_idx))
+
+        num_graphs = len(graph_list)
+
+        tic = time.perf_counter()
+        if self.pre_filter is not None:
+            graph_list = [graph for graph in graph_list if self.pre_filter(graph)]
+        toc = time.perf_counter()
+        num_graphs_filtered = len(graph_list)
+        print(f"Applying pre-filter took {(toc - tic):6.4f}s - {num_graphs_filtered} graphs in list")
+
+        tic = time.perf_counter()
+        if self.pre_transform is not None:
+            graph_list = [self.pre_transform(data) for data in graph_list]
+        toc = time.perf_counter()
+        print(f"Applying pre-transform took {(toc - tic):6.4f}s")
+
+        data, slices = self.collate(graph_list)
+        print(f"Saving to {self.processed_paths[0]}")
+        torch.save((data, slices), self.processed_paths[0])
 
 
 # End of file pyg_xgc_loaders2.py

@@ -18,7 +18,7 @@ import networkx as nx
 from sklearn import preprocessing
 from itertools import product
 
-sys.path.append("/home/rkube/software/adios2-release_25/lib64/python3.7/site-packages")
+sys.path.append("/home/rkube/software/adios2-release_25/lib/python3.8/site-packages")
 import adios2
 from ..xgc_utils import xgc_grid, xgc_helpers
 from .subgraphs import kneighbor_squashed
@@ -1317,9 +1317,9 @@ class XGC_kneighbor_squashed(InMemoryDataset):
 
         # For statistics of ne, ni, ue, ui, apar and dpot fields over time, see explore_data_mldata_case2_normalizations.ipynb
         data_x = torch.tensor([features_node["B"],
-                               features_node["eden"] * 1e-7, features_node["iden"] * 1e-7,
-                               features_node["u_e"] * 1e-14, features_node["u_i"] * 1e-14,
-                               features_node["a_par"] * 1e13, features_node["dpot"] * 1e7,
+                               features_node["eden"], features_node["iden"],
+                               features_node["u_e"], features_node["u_i"],
+                               features_node["a_par"], features_node["dpot"],
                                features_node["apar_res"], features_node["pot_res"]]).T
 
         # Compile target features

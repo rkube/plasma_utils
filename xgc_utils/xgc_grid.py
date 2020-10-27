@@ -321,7 +321,7 @@ def normalized_cartesian_distance(root_vtx: int, conns: list, coords: np.ndarray
     return(dist)
 
 
-def normalized_cartesian_distance_old(nodeidx0, conns, coords, norm_par, norm_perp, num_planes=8):
+def normalized_cartesian_distance_old(root_vtx, conns, coords, norm_par, norm_perp, num_planes=8):
      """Calculates the normalized cartesian distance from node nodeix0 to each item in conns.
      The value to normalize is taken to be at the to-node. I.e. we assume that there is little variation
      in value we normalize to.
@@ -331,7 +331,7 @@ def normalized_cartesian_distance_old(nodeidx0, conns, coords, norm_par, norm_pe
 
      Input:
      ======
-     nodeidx0: int, from node
+     root_vtx: int, from node
      conns: list, to nodes
      coords: array, shape(nnodes, 2). Vector of R,Z coordinates.
      norm_par: array, shape(nnodes)
@@ -344,7 +344,7 @@ def normalized_cartesian_distance_old(nodeidx0, conns, coords, norm_par, norm_pe
      """
 
 
-     R0, Z0 = coords[nodeidx0]
+     R0, Z0 = coords[root_vtx]
      # Create array from conection list
      conns_vec = np.array(conns)
      R_vec = coords[conns_vec[:, 0], 0]
